@@ -1,0 +1,3 @@
+Pychado is a collection of classes to work on data stored in a Chado database.
+As of now, it's a really alpha project from the INTA Bioinformatics group from Argentina, not ready for anyone else to use.
+Most of the code here has been written by Bernardo Clavijo, so any blame should start there.
