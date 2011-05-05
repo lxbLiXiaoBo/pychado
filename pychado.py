@@ -6,11 +6,13 @@
 
 import sys
 import psycopg2
+import math
 
 class GoTerm(object):
-    def __init__(self,id,name):
+    def __init__(self,id,name, definition= ''):
         self.id=id
         self.name=name
+        self.definition=definition
         self.childs=[]
         self.features=[]
         self.is_child=False
@@ -35,7 +37,7 @@ class GoTerm(object):
         self.childs.append(child)
     
     def html_dump(self,feature_link_prefix='/'):
-        code="<h4>"+self.name+" (%d)</h4><ul>\n"%self.feature_count()
+        code="<h4 id=%s title=\"GO:%s\n%s\">" % (self.id,self.id,self.definition) +self.name+" (%d)</h4><ul>\n"%self.feature_count()
         for c in self.childs:
             code+="<li>"+c.html_dump(feature_link_prefix)+"</li>\n"
         for f in self.features:
@@ -72,6 +74,15 @@ class Feature(object):
         code+='</table>'
         return code
 
+    def fasta_header(self,chado):
+        return '\n>%s\n' % self.name
+    def fasta_sequence(self,chado):
+        chado.cur.execute("select residues from feature where feature_id=%s",[self.id])
+        r=chado.cur.fetchone()[0]
+        WIDTH=60
+        return '\n'.join( [r[WIDTH*n:WIDTH*n+WIDTH] for n in xrange(math.ceil(len(r)/float(WIDTH)))])+'\n'
+        
+
 
 
 class PyChado(object):
@@ -83,6 +94,9 @@ class PyChado(object):
         self.cur.execute("SELECT organism_id,common_name from organism;")
         return [(int(org[0]),org[1]) for org in self.cur.fetchall()]
 
+    def insert_organism(self,abbreviation,genus,species,common_name,comment):
+        self.cur.execute('insert into organism (abbreviation,genus,species,common_name,comment) values (%s,%s,%s,%s,%s)',[abbreviation,genus,species,common_name,comment])
+        self.db.commit()
 
     def insert_feature(self,organism,name,type_id,residues,analysis):
         self.cur.execute("insert into feature (organism_id,name,uniquename,residues,seqlen,type_id,is_analysis) values (%s,%s,%s,%s,%s,%s,%s)", [organism, name, name, residues, len(residues), type_id, analysis])
@@ -153,12 +167,18 @@ class PyChado(object):
                 if line[-1]=='\n': line=line[:-1]
             except:
                 pass
+            print line
             line=line.split(',')
             dbname,accession=line[1].split(':')
             #get ids
-            feature_id= get_feature_id(line[0])
-            cvterm_id= get_cvterm_id(dbname,accession)
+            feature_id= self.get_feature_id(line[0])
+            #print "buscando cvterm para dbname=%s  , accession=%s"%(dbname,accession)
+            #try:
+            cvterm_id= self.get_cvterm_id(dbname,accession)
             self.cur.execute("insert into feature_cvterm (feature_id,cvterm_id,pub_id) values (%s,%s,%s);", [feature_id,cvterm_id,pub_id])
+            #except:
+            #    print "error: cvterm no encontrado, salteando"
+                
         self.db.commit()
 
     def insert_blast_xml_results(self,organism_id,file,analysis='blast run',description=''):
@@ -177,6 +197,7 @@ class PyChado(object):
 
             if len(query.descriptions)>0:
                 #check for the query to be on the database
+                print "checking for query existence: %s" % query.query
                 qfeatureid=self.get_feature_id(query.query.split()[0])
                 assert qfeatureid > 0
             
@@ -201,7 +222,7 @@ class PyChado(object):
                 try:
                     targetid=self.cur.fetchone()[0];
                 except:
-                    self.cur.execute('insert into feature (organism_id,uniquename,name,type_id) values (%s,%s,%s,%s)',[organism_id,query.alignments[i].accession,query.alignments[i].hit_def,region_id])
+                    self.cur.execute('insert into feature (organism_id,uniquename,name,type_id) values (%s,%s,%s,%s)',[organism_id,query.alignments[i].accession[:255],query.alignments[i].hit_def[:255],region_id])
                     self.cur.execute('select feature_id from feature where uniquename=%s',[query.alignments[i].accession])
                     targetid=self.cur.fetchone()[0];
 
@@ -234,29 +255,29 @@ class PyChado(object):
         features={}
 
         #get all features annotated with the cv, insert them into features and the direct annotation in terms
-        self.cur.execute("select f.feature_id, f.name, t.cvterm_id, t.name from feature f, feature_cvterm ft, cvterm t where f.feature_id=ft.feature_id and t.cvterm_id=ft.cvterm_id and t.cv_id=%s" , [cv_id])
-        for fid, fname, tid, tname in self.cur.fetchall():
+        self.cur.execute("select f.feature_id, f.name, t.cvterm_id, t.name, t.definition from feature f, feature_cvterm ft, cvterm t where f.feature_id=ft.feature_id and t.cvterm_id=ft.cvterm_id and t.cv_id=%s" , [cv_id])
+        for fid, fname, tid, tname, tdef in self.cur.fetchall():
             if not features.has_key(fid):
                 features[fid]=Feature(fid,fname)
             if not terms.has_key(tid):
-                terms[tid]=GoTerm(tid, tname)
+                terms[tid]=GoTerm(tid, tname,tdef)
 
             terms[tid].add_feature(features[fid])
 
         #recreate term tree (XXX: no cycle detection!!!)
-        self.cur.execute("select r.subject_id, st.name, r.object_id, ot.name from cvterm_relationship r, cvterm st, cvterm ot where r.type_id=%s and st.cvterm_id=r.subject_id and ot.cvterm_id=r.object_id and st.cv_id=%s and ot.cv_id=%s;" , [isa_id, cv_id, cv_id])
+        self.cur.execute("select r.subject_id, st.name, r.object_id, ot.name, ot.definition from cvterm_relationship r, cvterm st, cvterm ot where r.type_id=%s and st.cvterm_id=r.subject_id and ot.cvterm_id=r.object_id and st.cv_id=%s and ot.cv_id=%s;" , [isa_id, cv_id, cv_id])
         rels= self.cur.fetchall()
         parents_added=True
         while parents_added:
             parents_added=False
             newchilds=[]
-            for sid, sname, oid, oname in rels:
+            for sid, sname, oid, oname, odef in rels:
                 #only insert if child exists and hasn't got a father
                 if terms.has_key(sid) and terms[sid].is_child==False:
                     #create father if needed
                     if not terms.has_key(oid):
                         parents_added=True
-                        terms[oid]=GoTerm(oid, oname)
+                        terms[oid]=GoTerm(oid, oname,odef)
                     terms[oid].add_child(terms[sid])
                     newchilds.append(terms[sid])
             for c in newchilds: c.is_child=True
